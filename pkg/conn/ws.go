@@ -6,9 +6,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gorilla/websocket"
 	"k8s.io/klog/v2"
 
-	"github.com/gorilla/websocket"
 	"github.com/kubeedge/beehive/pkg/core/model"
 	"github.com/kubeedge/viaduct/pkg/api"
 	"github.com/kubeedge/viaduct/pkg/comm"
@@ -19,28 +19,30 @@ import (
 )
 
 type WSConnection struct {
-	WriteDeadline time.Time
-	ReadDeadline  time.Time
-	handler       mux.Handler
-	wsConn        *websocket.Conn
-	state         *ConnectionState
-	syncKeeper    *keeper.SyncKeeper
-	connUse       api.UseType
-	consumer      io.Writer
-	autoRoute     bool
-	messageFifo   *fifo.MessageFifo
-	locker        sync.Mutex
+	WriteDeadline      time.Time
+	ReadDeadline       time.Time
+	handler            mux.Handler
+	wsConn             *websocket.Conn
+	state              *ConnectionState
+	syncKeeper         *keeper.SyncKeeper
+	connUse            api.UseType
+	consumer           io.Writer
+	autoRoute          bool
+	messageFifo        *fifo.MessageFifo
+	locker             sync.Mutex
+	OnReadTransportErr func(nodeID, projectID string)
 }
 
 func NewWSConn(options *ConnectionOptions) *WSConnection {
 	return &WSConnection{
-		wsConn:      options.Base.(*websocket.Conn),
-		handler:     options.Handler,
-		syncKeeper:  keeper.NewSyncKeeper(),
-		state:       options.State,
-		connUse:     options.ConnUse,
-		autoRoute:   options.AutoRoute,
-		messageFifo: fifo.NewMessageFifo(),
+		wsConn:             options.Base.(*websocket.Conn),
+		handler:            options.Handler,
+		syncKeeper:         keeper.NewSyncKeeper(),
+		state:              options.State,
+		connUse:            options.ConnUse,
+		autoRoute:          options.AutoRoute,
+		messageFifo:        fifo.NewMessageFifo(),
+		OnReadTransportErr: options.OnReadTransportErr,
 	}
 }
 
@@ -56,16 +58,6 @@ func (conn *WSConnection) ServeConn() {
 	}
 }
 
-// process control messages
-func (conn *WSConnection) processControlMessage(msg *model.Message) error {
-	switch msg.GetOperation() {
-	case comm.ControlTypeConfig:
-	case comm.ControlTypePing:
-	case comm.ControlTypePong:
-	}
-	return nil
-}
-
 func (conn *WSConnection) filterControlMessage(msg *model.Message) bool {
 	// check control message
 	operation := msg.GetOperation()
@@ -75,17 +67,10 @@ func (conn *WSConnection) filterControlMessage(msg *model.Message) bool {
 		return false
 	}
 
-	// process control message
-	result := comm.RespTypeAck
-	err := conn.processControlMessage(msg)
-	if err != nil {
-		result = comm.RespTypeNack
-	}
-
 	// feedback the response
-	resp := msg.NewRespByMessage(msg, result)
+	resp := msg.NewRespByMessage(msg, comm.RespTypeAck)
 	conn.locker.Lock()
-	err = lane.NewLane(api.ProtocolTypeWS, conn.wsConn).WriteMessage(resp)
+	err := lane.NewLane(api.ProtocolTypeWS, conn.wsConn).WriteMessage(resp)
 	conn.locker.Unlock()
 	if err != nil {
 		klog.Errorf("failed to send response back, error:%+v", err)
@@ -122,7 +107,13 @@ func (conn *WSConnection) handleMessage() {
 				klog.Errorf("failed to read message, error: %+v", err)
 			}
 			conn.state.State = api.StatDisconnected
-			conn.wsConn.Close()
+			_ = conn.wsConn.Close()
+
+			if conn.OnReadTransportErr != nil {
+				conn.OnReadTransportErr(conn.state.Headers.Get("node_id"),
+					conn.state.Headers.Get("project_id"))
+			}
+
 			return
 		}
 
@@ -176,7 +167,7 @@ func (conn *WSConnection) Write(raw []byte) (int, error) {
 
 func (conn *WSConnection) WriteMessageAsync(msg *model.Message) error {
 	lane := lane.NewLane(api.ProtocolTypeWS, conn.wsConn)
-	lane.SetWriteDeadline(conn.WriteDeadline)
+	_ = lane.SetWriteDeadline(conn.WriteDeadline)
 	msg.Header.Sync = false
 	conn.locker.Lock()
 	defer conn.locker.Unlock()
@@ -186,7 +177,7 @@ func (conn *WSConnection) WriteMessageAsync(msg *model.Message) error {
 func (conn *WSConnection) WriteMessageSync(msg *model.Message) (*model.Message, error) {
 	lane := lane.NewLane(api.ProtocolTypeWS, conn.wsConn)
 	// send msg
-	lane.SetWriteDeadline(conn.WriteDeadline)
+	_ = lane.SetWriteDeadline(conn.WriteDeadline)
 	msg.Header.Sync = true
 	conn.locker.Lock()
 	err := lane.WriteMessage(msg)
