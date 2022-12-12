@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/lucas-clemente/quic-go"
 	"k8s.io/klog/v2"
 
 	"github.com/kubeedge/beehive/pkg/core/model"
@@ -18,7 +19,6 @@ import (
 	"github.com/kubeedge/viaduct/pkg/lane"
 	"github.com/kubeedge/viaduct/pkg/mux"
 	"github.com/kubeedge/viaduct/pkg/smgr"
-	"github.com/lucas-clemente/quic-go"
 )
 
 var (
@@ -26,7 +26,7 @@ var (
 	autoFree = false
 )
 
-// the connection based on quic protocol
+// QuicConnection the connection based on quic protocol
 type QuicConnection struct {
 	writeDeadline time.Time
 	readDeadline  time.Time
@@ -42,11 +42,11 @@ type QuicConnection struct {
 	autoRoute     bool
 }
 
-// new quic connection
+// NewQuicConn new quic connection
 func NewQuicConn(options *ConnectionOptions) *QuicConnection {
 	quicSession := options.Base.(quic.Session)
 	return &QuicConnection{
-		session:       smgr.Session{quicSession},
+		session:       smgr.Session{Sess: quicSession},
 		handler:       options.Handler,
 		ctrlLan:       options.CtrlLane.(lane.Lane),
 		state:         options.State,
@@ -61,6 +61,10 @@ func NewQuicConn(options *ConnectionOptions) *QuicConnection {
 
 // process header message
 func (conn *QuicConnection) headerMessage(msg *model.Message) error {
+	if msg == nil {
+		klog.Errorf("nil message error")
+		return fmt.Errorf("nil message error")
+	}
 	headers := make(http.Header)
 	err := json.Unmarshal(msg.GetContent().([]byte), &headers)
 	if err != nil {
@@ -68,16 +72,6 @@ func (conn *QuicConnection) headerMessage(msg *model.Message) error {
 		return err
 	}
 	conn.state.Headers = headers
-	return nil
-}
-
-// process control messages
-func (conn *QuicConnection) processControlMessage(msg *model.Message) error {
-	switch msg.GetOperation() {
-	case comm.ControlTypeConfig:
-	case comm.ControlTypePing:
-	case comm.ControlTypePong:
-	}
 	return nil
 }
 
@@ -92,15 +86,8 @@ func (conn *QuicConnection) serveControlLan() {
 			return
 		}
 
-		// process control message
-		result := comm.RespTypeAck
-		err = conn.processControlMessage(&msg)
-		if err != nil {
-			result = comm.RespTypeNack
-		}
-
 		// feedback the response
-		resp := msg.NewRespByMessage(&msg, result)
+		resp := msg.NewRespByMessage(&msg, comm.RespTypeAck)
 		err = conn.ctrlLan.WriteMessage(resp)
 		if err != nil {
 			klog.Errorf("failed to send response back, error:%+v", err)
@@ -276,7 +263,7 @@ func (conn *QuicConnection) WriteMessageSync(msg *model.Message) (*model.Message
 	defer conn.streamManager.ReleaseStream(api.UseTypeMessage, stream)
 
 	lane := lane.NewLane(api.ProtocolTypeQuic, stream)
-	lane.SetWriteDeadline(conn.writeDeadline)
+	_ = lane.SetWriteDeadline(conn.writeDeadline)
 	msg.Header.Sync = true
 	err = lane.WriteMessage(msg)
 	if err != nil {
@@ -303,7 +290,7 @@ func (conn *QuicConnection) WriteMessageAsync(msg *model.Message) error {
 	defer conn.streamManager.ReleaseStream(api.UseTypeMessage, stream)
 
 	lane := lane.NewLane(api.ProtocolTypeQuic, stream)
-	lane.SetWriteDeadline(conn.writeDeadline)
+	_ = lane.SetWriteDeadline(conn.writeDeadline)
 	msg.Header.Sync = false
 	return lane.WriteMessage(msg)
 }

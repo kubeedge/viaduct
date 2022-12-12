@@ -6,9 +6,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gorilla/websocket"
 	"k8s.io/klog/v2"
 
-	"github.com/gorilla/websocket"
 	"github.com/kubeedge/beehive/pkg/core/model"
 	"github.com/kubeedge/viaduct/pkg/api"
 	"github.com/kubeedge/viaduct/pkg/comm"
@@ -56,16 +56,6 @@ func (conn *WSConnection) ServeConn() {
 	}
 }
 
-// process control messages
-func (conn *WSConnection) processControlMessage(msg *model.Message) error {
-	switch msg.GetOperation() {
-	case comm.ControlTypeConfig:
-	case comm.ControlTypePing:
-	case comm.ControlTypePong:
-	}
-	return nil
-}
-
 func (conn *WSConnection) filterControlMessage(msg *model.Message) bool {
 	// check control message
 	operation := msg.GetOperation()
@@ -75,17 +65,10 @@ func (conn *WSConnection) filterControlMessage(msg *model.Message) bool {
 		return false
 	}
 
-	// process control message
-	result := comm.RespTypeAck
-	err := conn.processControlMessage(msg)
-	if err != nil {
-		result = comm.RespTypeNack
-	}
-
 	// feedback the response
-	resp := msg.NewRespByMessage(msg, result)
+	resp := msg.NewRespByMessage(msg, comm.RespTypeAck)
 	conn.locker.Lock()
-	err = lane.NewLane(api.ProtocolTypeWS, conn.wsConn).WriteMessage(resp)
+	err := lane.NewLane(api.ProtocolTypeWS, conn.wsConn).WriteMessage(resp)
 	conn.locker.Unlock()
 	if err != nil {
 		klog.Errorf("failed to send response back, error:%+v", err)
@@ -176,7 +159,7 @@ func (conn *WSConnection) Write(raw []byte) (int, error) {
 
 func (conn *WSConnection) WriteMessageAsync(msg *model.Message) error {
 	lane := lane.NewLane(api.ProtocolTypeWS, conn.wsConn)
-	lane.SetWriteDeadline(conn.WriteDeadline)
+	_ = lane.SetWriteDeadline(conn.WriteDeadline)
 	msg.Header.Sync = false
 	conn.locker.Lock()
 	defer conn.locker.Unlock()
@@ -186,7 +169,7 @@ func (conn *WSConnection) WriteMessageAsync(msg *model.Message) error {
 func (conn *WSConnection) WriteMessageSync(msg *model.Message) (*model.Message, error) {
 	lane := lane.NewLane(api.ProtocolTypeWS, conn.wsConn)
 	// send msg
-	lane.SetWriteDeadline(conn.WriteDeadline)
+	_ = lane.SetWriteDeadline(conn.WriteDeadline)
 	msg.Header.Sync = true
 	conn.locker.Lock()
 	err := lane.WriteMessage(msg)
